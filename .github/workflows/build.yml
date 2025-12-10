@@ -1,30 +1,120 @@
-name: Build nav3-recipes
+name: Create Release APK (signed with debug key)
 
+# Trigger: push to any branch OR manual dispatch (prompts for branch)
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build (when using Manual / workflow_dispatch)'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    # Run for tag pushes is removed — we build for pushes or workflow_dispatch
+    if: startsWith(github.ref, 'refs/heads/') || github.event_name == 'workflow_dispatch'
 
-      - name: Set Up JDK
+    steps:
+      - name: Checkout (manual run: use provided branch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v4
+        with:
+          # checkout the branch the user provided when manually triggering
+          ref: ${{ 'refs/heads/' + github.event.inputs.branch }}
+
+      - name: Checkout (push run)
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '17'
-          cache: 'gradle'
+          java-version: 17
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+          # cache-read-only is preserved; adjust if you want different behavior
+          cache-read-only: ${{ !(github.ref == 'refs/heads/main' }}
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: Grant execute permissions for gradle wrapper
+        run: chmod +x gradlew
 
-      - name: Build debug app
-        run: ./gradlew :app:assembleDebug
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Collect release APK
+        id: find_apk
+        run: |
+          mkdir -p artifacts
+          # find the first matching release apk (common paths: app/build/outputs/apk/release/)
+          APK_PATH="$(find . -type f -name '*-release.apk' -print -quit || true)"
+          if [ -z "$APK_PATH" ]; then
+            echo "No release APK found. Listing build outputs for debugging:"
+            ls -R app/build || true
+            exit 1
+          fi
+          echo "Found APK: $APK_PATH"
+          cp "$APK_PATH" artifacts/app-release-unsigned.apk
+          # expose path to subsequent steps
+          echo "apk_path=artifacts/app-release-unsigned.apk" >> $GITHUB_OUTPUT
+
+      - name: Create debug keystore (android debug key)
+        run: |
+          # generate a local debug keystore with the conventional android debug passwords
+          # storepass: android
+          # keypass: android
+          keytool -genkeypair \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -keystore debug.keystore \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Sign APK with debug keystore
+        run: |
+          unsigned_apk="artifacts/app-release-unsigned.apk"
+          signed_apk="artifacts/app-release-signed-debug.apk"
+          if [ ! -f "$unsigned_apk" ]; then
+            echo "Unsigned APK not found at $unsigned_apk"
+            exit 1
+          fi
+
+          # jarsigner signs the apk. Use -signedjar to emit a separate signed file.
+          jarsigner \
+            -keystore debug.keystore \
+            -storepass android \
+            -keypass android \
+            -signedjar "$signed_apk" \
+            "$unsigned_apk" \
+            androiddebugkey
+
+          # Confirm signed APK exists
+          if [ ! -f "$signed_apk" ]; then
+            echo "Signing failed: $signed_apk not created"
+            exit 1
+          fi
+
+          # (optional) report signature info
+          jarsigner -verify -verbose -certs "$signed_apk" || true
+
+          # make artifact readable
+          ls -l artifacts
+
+      - name: Upload signed APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-signed-debug-apk
+          path: artifacts/app-release-signed-debug.apk
