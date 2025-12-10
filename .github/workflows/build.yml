@@ -1,11 +1,11 @@
 name: Create Release APK (signed with debug key)
 
-# Trigger: push to any branch OR manual dispatch (prompts for branch)
+# Trigger: manual dispatch only (prompts for branch)
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to build (when using Manual / workflow_dispatch)'
+        description: 'Branch to build'
         required: true
         default: 'main'
 
@@ -15,20 +15,15 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Run for tag pushes is removed — we build for pushes or workflow_dispatch
-    if: startsWith(github.ref, 'refs/heads/') || github.event_name == 'workflow_dispatch'
+    # Only run when manually triggered (workflow_dispatch)
+    if: ${{ github.event_name == 'workflow_dispatch' }}
 
     steps:
-      - name: Checkout branch (manual / default)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Checkout repository (branch from input)
         uses: actions/checkout@v4
         with:
-          # checkout the branch the user provided when manually triggering
-          ref: ${{ 'refs/heads/' + github.event.inputs.branch }}
-
-      - name: Checkout (push run)
-        if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+          # Checkout the branch provided in the workflow_dispatch input
+          ref: ${{ github.event.inputs.branch }}
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -40,8 +35,6 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: wrapper
-          # cache-read-only is preserved; adjust if you want different behavior
-          cache-read-only: ${{ !(github.ref == 'refs/heads/main' }}
 
       - name: Grant execute permissions for gradle wrapper
         run: chmod +x gradlew
@@ -53,7 +46,6 @@ jobs:
         id: find_apk
         run: |
           mkdir -p artifacts
-          # find the first matching release apk (common paths: app/build/outputs/apk/release/)
           APK_PATH="$(find . -type f -name '*-release.apk' -print -quit || true)"
           if [ -z "$APK_PATH" ]; then
             echo "No release APK found. Listing build outputs for debugging:"
@@ -62,14 +54,11 @@ jobs:
           fi
           echo "Found APK: $APK_PATH"
           cp "$APK_PATH" artifacts/app-release-unsigned.apk
-          # expose path to subsequent steps
           echo "apk_path=artifacts/app-release-unsigned.apk" >> $GITHUB_OUTPUT
 
       - name: Create debug keystore (android debug key)
         run: |
           # generate a local debug keystore with the conventional android debug passwords
-          # storepass: android
-          # keypass: android
           keytool -genkeypair \
             -alias androiddebugkey \
             -keyalg RSA \
@@ -89,7 +78,6 @@ jobs:
             exit 1
           fi
 
-          # jarsigner signs the apk. Use -signedjar to emit a separate signed file.
           jarsigner \
             -keystore debug.keystore \
             -storepass android \
@@ -98,16 +86,12 @@ jobs:
             "$unsigned_apk" \
             androiddebugkey
 
-          # Confirm signed APK exists
           if [ ! -f "$signed_apk" ]; then
             echo "Signing failed: $signed_apk not created"
             exit 1
           fi
 
-          # (optional) report signature info
           jarsigner -verify -verbose -certs "$signed_apk" || true
-
-          # make artifact readable
           ls -l artifacts
 
       - name: Upload signed APK as workflow artifact
