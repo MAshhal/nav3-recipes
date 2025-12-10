@@ -2,9 +2,6 @@ name: Create Release APK (signed with debug key)
 
 # Trigger: push to any branch OR manual dispatch (prompts for branch)
 on:
-  push:
-    branches:
-      - '**'
   workflow_dispatch:
     inputs:
       branch:
@@ -22,7 +19,7 @@ jobs:
     if: startsWith(github.ref, 'refs/heads/') || github.event_name == 'workflow_dispatch'
 
     steps:
-      - name: Checkout (manual run: use provided branch)
+      - name: Checkout branch (manual / default)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
